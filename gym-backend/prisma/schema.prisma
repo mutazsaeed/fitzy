@@ -1,0 +1,132 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id       Int    @id @default(autoincrement())
+  name     String
+  email    String @unique
+  phone    String @unique
+  age      Int
+  gender   String
+  city     String
+  password String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subscriptions Subscription[]
+  visits        Visit[]
+}
+
+model Admin {
+  id       Int       @id @default(autoincrement())
+  name     String
+  email    String    @unique
+  password String
+  role     AdminRole @default(SUPERVISOR)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum AdminRole {
+  OWNER
+  MANAGER
+  SUPERVISOR
+}
+
+model GymAdmin {
+  id       Int          @id @default(autoincrement())
+  name     String
+  email    String       @unique
+  password String
+  gymId    Int
+  gym      Gym          @relation(fields: [gymId], references: [id], onDelete: Cascade)
+  role     GymAdminRole @default(RECEPTIONIST)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum GymAdminRole {
+  GYM_SUPERVISOR
+  RECEPTIONIST
+}
+
+model Subscription {
+  id         Int      @id @default(autoincrement())
+  name       String
+  gender     String
+  level      String
+  price      Float
+  duration   Int
+  promoImage String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  users  User[]
+  gyms   Gym[]
+  visits Visit[]
+}
+
+model Gym {
+  id           Int      @id @default(autoincrement())
+  name         String
+  logo         String?
+  images       String[]
+  gender       String
+  category     String
+  latitude     Float?
+  longitude    Float?
+  address      String?
+  workingHours Json?
+  services     String[]
+  visitPrice   Float?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  subscriptions Subscription[]
+  visits        Visit[]
+  gymAdmins     GymAdmin[]
+}
+
+enum VisitStatus {
+  CHECKED_IN
+  CHECKED_OUT
+}
+
+enum VisitMethod {
+  QR
+  MANUAL
+}
+
+model Visit {
+  id             Int  @id @default(autoincrement())
+  userId         Int
+  gymId          Int
+  subscriptionId Int?
+
+  visitDate    DateTime    @db.Date
+  checkedInAt  DateTime    @default(now())
+  checkedOutAt DateTime?
+  status       VisitStatus @default(CHECKED_IN)
+  method       VisitMethod @default(QR)
+  notes        String?
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gym          Gym           @relation(fields: [gymId], references: [id], onDelete: Cascade)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, gymId, visitDate], map: "uniq_user_gym_per_day")
+  @@index([userId, visitDate])
+  @@index([gymId, visitDate])
+}

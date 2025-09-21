@@ -1,0 +1,24 @@
+﻿# Global
+.DS_Store
+Thumbs.db
+
+# Node / Nest (gym-backend)
+gym-backend/node_modules/
+gym-backend/dist/
+gym-backend/.env
+gym-backend/.env.*
+gym-backend/.cache/
+gym-backend/coverage/
+
+# Prisma
+gym-backend/prisma/dev.db
+gym-backend/prisma/*.db-journal
+
+# Logs
+gym-backend/npm-debug.log*
+gym-backend/yarn-error.log*
+gym-backend/pnpm-debug.log*
+
+# Editor
+.vscode/
+.idea/
