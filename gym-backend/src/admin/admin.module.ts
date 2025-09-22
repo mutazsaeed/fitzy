@@ -1,11 +1,16 @@
 import { Module } from '@nestjs/common';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaModule } from '../prisma/prisma.module';
+import { ReportingModule } from '../reporting/reporting.module';
 
 @Module({
+  imports: [
+    PrismaModule, // ✅ توفير PrismaService عبر الموديول القياسي
+    ReportingModule, // ✅ للسماح بحقن ReportingService داخل AdminService
+  ],
   controllers: [AdminController],
-  providers: [AdminService, PrismaService],
+  providers: [AdminService],
   exports: [AdminService],
 })
 export class AdminModule {}

@@ -10,6 +10,8 @@ import {
   ParseIntPipe,
   UseGuards,
   Request,
+  Query,
+  BadRequestException,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt.guard';
 import { RolesGuard } from '../auth/roles.guard';
@@ -68,10 +70,36 @@ export class AdminController {
     return this.adminService.deleteAdmin(req.user, id);
   }
 
-  // ✅ GET /admins/reports → تقارير (SUPERVISOR + MANAGER + OWNER)
+  // ✅ GET /admins/reports → تقارير بسيطة (SUPERVISOR + MANAGER + OWNER)
   @Get('reports')
   @Roles('SUPERVISOR', 'MANAGER', 'OWNER')
   async getReports(@Request() req: JwtRequest) {
     return this.adminService.getReports(req.user);
+  }
+
+  // ✅ NEW: GET /admins/overview-kpis → KPIs عامة (زيارات + placeholders)
+  // استخدم period=today|7d|30d أو from/to (YYYY-MM-DD)
+  @Get('overview-kpis')
+  @Roles('SUPERVISOR', 'MANAGER', 'OWNER')
+  async getOverviewKpis(
+    @Request() req: JwtRequest,
+    @Query('period') period?: 'today' | '7d' | '30d',
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    if (period && (period !== 'today' && period !== '7d' && period !== '30d')) {
+      throw new BadRequestException('period must be one of today|7d|30d');
+    }
+    if ((from && !to) || (!from && to)) {
+      throw new BadRequestException('from and to must be provided together');
+    }
+    if (
+      (from && !/^\d{4}-\d{2}-\d{2}$/.test(from)) ||
+      (to && !/^\d{4}-\d{2}-\d{2}$/.test(to))
+    ) {
+      throw new BadRequestException('from/to must be YYYY-MM-DD');
+    }
+
+    return this.adminService.getOverviewKpis(req.user, { period, from, to });
   }
 }

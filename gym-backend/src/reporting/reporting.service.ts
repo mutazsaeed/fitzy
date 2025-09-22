@@ -1,18 +1,21 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable prettier/prettier */
 // cspell:disable
 import { Injectable, BadRequestException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+
 import { GymAdminTodayReportDto } from './dto/gym-admin-today-report.dto';
 import { GymAdminRangeReportDto } from './dto/gym-admin-range-report.dto';
 import { GymAdminTopUsersDto } from './dto/gym-admin-top-users.dto';
-import { PrismaService } from '../prisma/prisma.service';
-import { Prisma } from '@prisma/client';
+import { AdminOverviewKpiDto } from './dto/admin-overview-kpi.dto';
 
 @Injectable()
 export class ReportingService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * helper: build Visit where clause
+   * Helper: build Visit where clause (gym + optional date range + optional branchId)
    */
   private buildVisitWhere(input: {
     gymId: number;
@@ -20,9 +23,7 @@ export class ReportingService {
     toExclusive?: Date;
     branchId?: number;
   }): Prisma.VisitWhereInput {
-    const where: Prisma.VisitWhereInput = {
-      gymId: input.gymId,
-    };
+    const where: Prisma.VisitWhereInput = { gymId: input.gymId };
     if (input.from && input.toExclusive) {
       where.visitDate = { gte: input.from, lt: input.toExclusive };
     }
@@ -54,9 +55,7 @@ export class ReportingService {
       branchId: params.branchId,
     });
 
-    const totalVisitsToday = await this.prisma.visit.count({
-      where: whereBase,
-    });
+    const totalVisitsToday = await this.prisma.visit.count({ where: whereBase });
 
     const uniqueUsersGroup = await this.prisma.visit.groupBy({
       by: ['userId'],
@@ -131,9 +130,7 @@ export class ReportingService {
     // daily breakdown via SQL (branch filtered if provided)
     let rows: { date: string; visits: number }[] = [];
     if (params.branchId !== undefined) {
-      rows = await this.prisma.$queryRaw<
-        { date: string; visits: number }[]
-      >`
+      rows = await this.prisma.$queryRaw<{ date: string; visits: number }[]>`
         SELECT to_char(date_trunc('day', "visitDate"), 'YYYY-MM-DD') AS date,
                COUNT(*)::int AS visits
         FROM "Visit"
@@ -145,9 +142,7 @@ export class ReportingService {
         ORDER BY 1
       `;
     } else {
-      rows = await this.prisma.$queryRaw<
-        { date: string; visits: number }[]
-      >`
+      rows = await this.prisma.$queryRaw<{ date: string; visits: number }[]>`
         SELECT to_char(date_trunc('day', "visitDate"), 'YYYY-MM-DD') AS date,
                COUNT(*)::int AS visits
         FROM "Visit"
@@ -163,10 +158,7 @@ export class ReportingService {
     const map = new Map(rows.map((r) => [r.date, r.visits]));
     const cur = new Date(fromStart);
     while (cur < toExclusive) {
-      const y = cur.getFullYear();
-      const m = `${cur.getMonth() + 1}`.padStart(2, '0');
-      const d = `${cur.getDate()}`.padStart(2, '0');
-      const key = `${y}-${m}-${d}`;
+      const key = this.toYmd(cur);
       dailyBreakdown.push({ date: key, visits: map.get(key) ?? 0 });
       cur.setDate(cur.getDate() + 1);
     }
@@ -237,7 +229,7 @@ export class ReportingService {
 
     const items = grouped.map((g) => ({
       userId: g.userId,
-      visits: g._count?.userId ?? 0,
+      visits: g._count.userId ?? 0,
       name: mapUser.get(g.userId)?.name,
       email: mapUser.get(g.userId)?.email,
     }));
@@ -245,6 +237,118 @@ export class ReportingService {
     return {
       range: { from: this.toYmd(fromStart), to: this.toYmd(toStart) },
       items,
+    };
+  }
+
+  // =========================
+  // Admin/Owner Overview KPI
+  // =========================
+
+  /**
+   * Resolve period string (today | 7d | 30d) or explicit from/to (YYYY-MM-DD).
+   */
+  private resolvePeriod(input: {
+    period?: 'today' | '7d' | '30d';
+    from?: string;
+    to?: string;
+  }): {
+    fromStart: Date;
+    toStart: Date;
+    toExclusive: Date;
+    fromStr: string;
+    toStr: string;
+  } {
+    let fromStart: Date;
+    let toStart: Date;
+
+    if (input.from && input.to) {
+      fromStart = this.parseYmdToLocalStart(input.from);
+      toStart = this.parseYmdToLocalStart(input.to);
+      if (fromStart > toStart) throw new BadRequestException('from must be <= to');
+    } else {
+      const p = input.period ?? '30d';
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      switch (p) {
+        case 'today':
+          toStart = new Date(today);
+          fromStart = new Date(today);
+          break;
+        case '7d':
+          toStart = new Date(today);
+          fromStart = new Date(today);
+          fromStart.setDate(fromStart.getDate() - 6);
+          break;
+        case '30d':
+        default:
+          toStart = new Date(today);
+          fromStart = new Date(today);
+          fromStart.setDate(fromStart.getDate() - 29);
+          break;
+      }
+    }
+
+    const toExclusive = new Date(toStart);
+    toExclusive.setDate(toExclusive.getDate() + 1);
+
+    return {
+      fromStart,
+      toStart,
+      toExclusive,
+      fromStr: this.toYmd(fromStart),
+      toStr: this.toYmd(toStart),
+    };
+  }
+
+  /**
+   * Platform-wide KPIs for Admin/Owner dashboard.
+   * - totalVisits: count of visits in period
+   * - activeSubscriptions: placeholder (requires subscription status model)
+   * - totalRevenue: placeholder (requires payments model)
+   * - timeseries: daily visits (filled for missing days)
+   */
+  async getPlatformOverview(params: {
+    period?: 'today' | '7d' | '30d';
+    from?: string; // YYYY-MM-DD
+    to?: string; // YYYY-MM-DD
+  }): Promise<AdminOverviewKpiDto> {
+    const { fromStart, toStart, toExclusive, fromStr, toStr } = this.resolvePeriod(params);
+
+    // visits count
+    const totalVisits = await this.prisma.visit.count({
+      where: { visitDate: { gte: fromStart, lt: toExclusive } },
+    });
+
+    // timeseries (daily visits)
+    const rows = await this.prisma.$queryRaw<{ date: string; visits: number }[]>`
+      SELECT to_char(date_trunc('day', "visitDate"), 'YYYY-MM-DD') AS date,
+             COUNT(*)::int AS visits
+      FROM "Visit"
+      WHERE "visitDate" >= ${fromStart}
+        AND "visitDate" < ${toExclusive}
+      GROUP BY 1
+      ORDER BY 1
+    `;
+
+    const ts: { date: string; visits: number }[] = [];
+    const map = new Map(rows.map((r) => [r.date, r.visits]));
+    const cur = new Date(fromStart);
+    while (cur < toExclusive) {
+      const key = this.toYmd(cur);
+      ts.push({ date: key, visits: map.get(key) ?? 0 });
+      cur.setDate(cur.getDate() + 1);
+    }
+
+    // placeholders until payments/subscription status are implemented
+    const activeSubscriptions = 0;
+    const totalRevenue = 0;
+
+    return {
+      period: { from: fromStr, to: toStr },
+      totalVisits,
+      activeSubscriptions,
+      totalRevenue,
+      timeseries: ts,
     };
   }
 }
