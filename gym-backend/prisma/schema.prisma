@@ -50,6 +50,9 @@ model GymAdmin {
   gym      Gym          @relation(fields: [gymId], references: [id], onDelete: Cascade)
   role     GymAdminRole @default(RECEPTIONIST)
 
+  // علاقات إلى الفروع عبر جدول الربط
+  branches GymAdminBranch[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -94,6 +97,9 @@ model Gym {
   subscriptions Subscription[]
   visits        Visit[]
   gymAdmins     GymAdmin[]
+
+  // NEW: فروع النادي
+  branches      Branch[]
 }
 
 enum VisitStatus {
@@ -106,10 +112,57 @@ enum VisitMethod {
   MANUAL
 }
 
+/**
+ * NEW: فرع يتبع نادي
+ * Gym (1) -- (N) Branch -- (N) Visit
+ */
+model Branch {
+  id           Int      @id @default(autoincrement())
+  gymId        Int
+  gym          Gym      @relation(fields: [gymId], references: [id], onDelete: Cascade)
+
+  name         String
+  address      String?
+  latitude     Float?
+  longitude    Float?
+  workingHours Json?
+  isActive     Boolean  @default(true)
+
+  // علاقات
+  visits       Visit[]
+  gymAdmins    GymAdminBranch[]
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([gymId, name], map: "uniq_branch_name_per_gym")
+  @@index([gymId, isActive])
+}
+
+/**
+ * NEW: ربط صلاحيات المشرفين على فروع محددة
+ */
+model GymAdminBranch {
+  gymAdminId Int
+  branchId   Int
+  assignedAt DateTime @default(now())
+
+  gymAdmin   GymAdmin @relation(fields: [gymAdminId], references: [id], onDelete: Cascade)
+  branch     Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@id([gymAdminId, branchId])
+  @@index([branchId])
+}
+
 model Visit {
   id             Int  @id @default(autoincrement())
   userId         Int
   gymId          Int
+
+  // NEW: ربط الزيارة بفرع (اختياري الآن — سنجعله Required لاحقاً بعد تفعيل كامل المنظومة)
+  branchId       Int?
+  branch         Branch?       @relation(fields: [branchId], references: [id])
+
   subscriptionId Int?
 
   visitDate    DateTime    @db.Date
@@ -126,7 +179,11 @@ model Visit {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // مبدئياً نُبقي القيد الحالي كما هو (بدون branchId) لتفادي تعارض البيانات القديمة
   @@unique([userId, gymId, visitDate], map: "uniq_user_gym_per_day")
+
+  // فهارس
   @@index([userId, visitDate])
   @@index([gymId, visitDate])
+  @@index([branchId, visitDate])
 }
