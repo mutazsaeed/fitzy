@@ -6,8 +6,8 @@ import { ReportingModule } from '../reporting/reporting.module';
 
 @Module({
   imports: [
-    PrismaModule, // ✅ توفير PrismaService عبر الموديول القياسي
-    ReportingModule, // ✅ للسماح بحقن ReportingService داخل AdminService
+    PrismaModule,
+    ReportingModule, // لحقن ReportingService داخل AdminService
   ],
   controllers: [AdminController],
   providers: [AdminService],

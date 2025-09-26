@@ -1,10 +1,13 @@
+/* eslint-disable prettier/prettier */
 import { Module } from '@nestjs/common';
-import { ReportingService } from './reporting.service';
 import { PrismaModule } from '../prisma/prisma.module';
+import { ReportingService } from './reporting.service';
+import { ReportingController, GymAdminReportingController } from './reporting.controller';
 
 @Module({
-  imports: [PrismaModule], // ✅ نوفر PrismaService داخل هذا المودول
+  imports: [PrismaModule],
   providers: [ReportingService],
+  controllers: [ReportingController, GymAdminReportingController],
   exports: [ReportingService],
 })
 export class ReportingModule {}
