@@ -5,19 +5,21 @@ import { AuthController } from './auth.controller';
 import { JwtStrategy } from './jwt.strategy';
 import { GymAdminAuthModule } from './gym-admin/gym-admin-auth.module';
 import { AdminAuthModule } from './admin/admin-auth.module';
+import { UserAuthModule } from './user/user-auth.module'; // 👈 جديد
 
 @Module({
   imports: [
     JwtModule.register({
       global: true,
-      secret: process.env.JWT_SECRET || 'secretKey', // fallback لو المتغير مو موجود
+      secret: process.env.JWT_SECRET || 'secretKey',
       signOptions: { expiresIn: process.env.JWT_EXPIRES_IN || '1h' },
     }),
     GymAdminAuthModule,
-    AdminAuthModule, // 👈 نستدعي المودل فقط
+    AdminAuthModule,
+    UserAuthModule, // 👈 سجّل موديل المستخدم
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy],
-  exports: [AuthService], // 👈 للتصدير لو نحتاجه بغير مكان
+  exports: [AuthService],
 })
 export class AuthModule {}

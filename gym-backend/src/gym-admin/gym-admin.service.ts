@@ -1,14 +1,17 @@
 /* eslint-disable prettier/prettier */
+// cspell:disable
 import { Injectable, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { GymAdminRole } from '@prisma/client';
-import { ReportingService } from '../reporting/reporting.service';
+
+// ✅ استخدم الخدمة الجديدة بدل ReportingService
+import { GymAdminReportsService } from '../reporting/services/gym-admin-reports.service';
 
 @Injectable()
 export class GymAdminService {
   constructor(
     private prisma: PrismaService,
-    private reporting: ReportingService,
+    private gymReports: GymAdminReportsService,
   ) {}
 
   /**
@@ -57,7 +60,7 @@ export class GymAdminService {
       throw new ForbiddenException('فقط المشرف يمكنه عرض تقارير اليوم');
     }
     const branchId = await this.assertBranchAccess(currentAdmin, opts.branchId);
-    return this.reporting.getGymAdminToday({
+    return this.gymReports.getGymAdminToday({
       gymId: currentAdmin.gymId,
       branchId,
     });
@@ -73,7 +76,7 @@ export class GymAdminService {
       throw new ForbiddenException('فقط المشرف يمكنه عرض تقارير المدى الزمني');
     }
     const branchId = await this.assertBranchAccess(currentAdmin, opts.branchId);
-    return this.reporting.getGymAdminRange({
+    return this.gymReports.getGymAdminRange({
       gymId: currentAdmin.gymId,
       from: params.from,
       to: params.to,
@@ -91,7 +94,7 @@ export class GymAdminService {
       throw new ForbiddenException('فقط المشرف يمكنه عرض أفضل العملاء');
     }
     const branchId = await this.assertBranchAccess(currentAdmin, opts.branchId);
-    return this.reporting.getGymAdminTopUsers({
+    return this.gymReports.getGymAdminTopUsers({
       gymId: currentAdmin.gymId,
       limit: params.limit,
       from: params.from,

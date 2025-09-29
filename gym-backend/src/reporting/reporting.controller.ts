@@ -1,51 +1,155 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
-import { ReportingService } from './reporting.service';
-import { JwtAuthGuard } from '../auth/jwt.guard';
+/* eslint-disable prettier/prettier */
+// cspell:disable
+import { Controller, Get, Query, Param } from '@nestjs/common';
 
-// DTOs
+// Services (new split)
+import { AnalyticsReportsService } from './services/analytics-reports.service';
+import { GymAdminReportsService } from './services/gym-admin-reports.service';
+import { UserReportsService } from './services/user-reports.service';
+import { ReconciliationService } from './services/reconciliation.service';
+import { ExportsService } from './services/exports.service';
+
+// DTOs used by endpoints
+import { AdminOverviewKpiDto } from './dto/admin-overview-kpi.dto';
+
+import { TopGymsQueryDto } from './dto/top-gyms.query.dto';
+import { TopGymsResponse } from './dto/top-gyms.response.dto';
+
 import { PlanUsageQueryDto } from './dto/plan-usage.query.dto';
-import { GymHourlyHeatmapQueryDto } from './dto/gym-hourly-heatmap.dto';
-import { GymBranchDailyQueryDto } from './dto/gym-branch-daily.dto';
+import { PlanUsageResponseDto } from './dto/plan-usage.response.dto';
+
+import {
+  GymHourlyHeatmapQueryDto,
+  GymHourlyHeatmapResponseDto,
+} from './dto/gym-hourly-heatmap.dto';
+
+import {
+  GymBranchDailyQueryDto,
+  GymBranchDailyResponseDto,
+} from './dto/gym-branch-daily.dto';
+
 import { ReconciliationQueryDto } from './dto/reconciliation.query.dto';
+import { ReconciliationResponseDto } from './dto/reconciliation.response.dto';
 
-// -------------------------------
-// Admin/Owner endpoints
-// -------------------------------
-@Controller('reports/admin')
-@UseGuards(JwtAuthGuard)
+import { UserVisitsQueryDto } from './dto/user-visits.query.dto';
+import { UserVisitsResponseDto } from './dto/user-visits.response.dto';
+
+import { GymAdminTodayReportDto } from './dto/gym-admin-today-report.dto';
+import { GymAdminRangeReportDto } from './dto/gym-admin-range-report.dto';
+import { GymAdminTopUsersDto } from './dto/gym-admin-top-users.dto';
+
+@Controller('reporting')
 export class ReportingController {
-  constructor(private readonly reporting: ReportingService) {}
+  constructor(
+    private readonly analytics: AnalyticsReportsService,
+    private readonly reconciliation: ReconciliationService,
+    private readonly exportsService: ExportsService,
+  ) {}
 
-  // تقرير استعمال الباقات (Step 10)
-  @Get('plan-usage')
-  async getPlanUsage(@Query() q: PlanUsageQueryDto) {
-    return this.reporting.getPlanUsage(q);
+  // -------- Platform/Owner analytics --------
+
+  @Get('overview')
+  getPlatformOverview(
+    @Query() query: { period?: 'today' | '7d' | '30d'; from?: string; to?: string },
+  ): Promise<AdminOverviewKpiDto> {
+    return this.analytics.getPlatformOverview(query);
   }
 
-  // كشف المطابقة الشهري لكل الأندية (Step 12)
+  @Get('top-gyms')
+  getTopGyms(@Query() query: TopGymsQueryDto): Promise<TopGymsResponse> {
+    return this.analytics.getTopGyms(query);
+  }
+
+  @Get('plan-usage')
+  getPlanUsage(@Query() query: PlanUsageQueryDto): Promise<PlanUsageResponseDto> {
+    return this.analytics.getPlanUsage(query);
+  }
+
+  @Get('gym-hourly-heatmap')
+  getGymHourlyHeatmap(@Query() q: GymHourlyHeatmapQueryDto): Promise<GymHourlyHeatmapResponseDto> {
+    return this.analytics.getGymHourlyHeatmap(q);
+  }
+
+  @Get('gym-branch-daily')
+  getGymBranchDaily(@Query() q: GymBranchDailyQueryDto): Promise<GymBranchDailyResponseDto> {
+    return this.analytics.getGymBranchDaily(q);
+  }
+
+  // -------- Reconciliation (all clubs) --------
+
   @Get('reconciliation')
-  async getMonthlyReconciliation(@Query() q: ReconciliationQueryDto) {
-    return this.reporting.getMonthlyReconciliation(q);
+  getMonthlyReconciliation(
+    @Query() q: ReconciliationQueryDto,
+  ): Promise<ReconciliationResponseDto> {
+    return this.reconciliation.getMonthlyReconciliation(q);
+  }
+
+  @Get('reconciliation/export/csv')
+  async exportMonthlyReconciliationCsv(
+    @Query() q: ReconciliationQueryDto,
+  ): Promise<{ filename: string; mime: string; buffer: Buffer }> {
+    return this.exportsService.exportMonthlyReconciliationCsv(q);
+  }
+
+  @Get('reconciliation/export/pdf')
+  async exportMonthlyReconciliationPdf(
+    @Query() q: ReconciliationQueryDto,
+  ): Promise<{ filename: string; mime: string; buffer: Buffer }> {
+    return this.exportsService.exportMonthlyReconciliationPdf(q);
   }
 }
 
-// -------------------------------
-// Gym Admin endpoints (Step 11)
-// -------------------------------
-@Controller('gym-admins/reports')
-@UseGuards(JwtAuthGuard)
+@Controller('reporting/gym-admin')
 export class GymAdminReportingController {
-  constructor(private readonly reporting: ReportingService) {}
+  constructor(private readonly gymAdmin: GymAdminReportsService) {}
 
-  // خريطة الزيارات بالساعات (Heatmap)
-  @Get('hourly-heatmap')
-  async getHourlyHeatmap(@Query() q: GymHourlyHeatmapQueryDto) {
-    return this.reporting.getGymHourlyHeatmap(q);
+  @Get(':gymId/today')
+  getGymAdminToday(
+    @Param('gymId') gymIdStr: string,
+    @Query('branchId') branchIdStr?: string,
+  ): Promise<GymAdminTodayReportDto> {
+    const gymId = Number(gymIdStr);
+    const branchId = branchIdStr !== undefined ? Number(branchIdStr) : undefined;
+    return this.gymAdmin.getGymAdminToday({ gymId, branchId });
   }
 
-  // الزيارات اليومية لكل فرع (Line/Compare)
-  @Get('branch-daily')
-  async getBranchDaily(@Query() q: GymBranchDailyQueryDto) {
-    return this.reporting.getGymBranchDaily(q);
+  @Get(':gymId/range')
+  getGymAdminRange(
+    @Param('gymId') gymIdStr: string,
+    @Query('from') from: string,
+    @Query('to') to: string,
+    @Query('branchId') branchIdStr?: string,
+  ): Promise<GymAdminRangeReportDto> {
+    const gymId = Number(gymIdStr);
+    const branchId = branchIdStr !== undefined ? Number(branchIdStr) : undefined;
+    return this.gymAdmin.getGymAdminRange({ gymId, from, to, branchId });
+  }
+
+  @Get(':gymId/top-users')
+  getGymAdminTopUsers(
+    @Param('gymId') gymIdStr: string,
+    @Query('limit') limitStr?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('branchId') branchIdStr?: string,
+  ): Promise<GymAdminTopUsersDto> {
+    const gymId = Number(gymIdStr);
+    const limit = limitStr !== undefined ? Number(limitStr) : undefined;
+    const branchId = branchIdStr !== undefined ? Number(branchIdStr) : undefined;
+    return this.gymAdmin.getGymAdminTopUsers({ gymId, limit, from, to, branchId });
+  }
+}
+
+@Controller('reporting/user')
+export class UserReportingController {
+  constructor(private readonly userReports: UserReportsService) {}
+
+  @Get(':userId/visits')
+  getMyVisits(
+    @Param('userId') userIdStr: string,
+    @Query() q: UserVisitsQueryDto,
+  ): Promise<UserVisitsResponseDto> {
+    const userId = Number(userIdStr);
+    return this.userReports.getMyVisits(userId, q);
   }
 }

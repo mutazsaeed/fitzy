@@ -2,7 +2,9 @@
 import { Injectable, ForbiddenException } from '@nestjs/common';
 import { Prisma, AdminRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { ReportingService } from '../reporting/reporting.service';
+
+// استبدل ReportingService بالخدمات الجديدة
+import { AnalyticsReportsService } from '../reporting/services/analytics-reports.service';
 
 // Top Gyms DTOs
 import {
@@ -45,7 +47,7 @@ export interface GymDuesResponse {
 export class AdminService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly reportingService: ReportingService,
+    private readonly analytics: AnalyticsReportsService, // بدل ReportingService
   ) {}
 
   // ========= Helpers =========
@@ -179,7 +181,7 @@ export class AdminService {
 
   async getReports(current: { id: number; role: AdminRole }) {
     this.assertRole(current, [AdminRole.OWNER, AdminRole.MANAGER, AdminRole.SUPERVISOR]);
-    return this.reportingService.getPlatformOverview({ period: '30d' });
+    return this.analytics.getPlatformOverview({ period: '30d' });
   }
 
   async getOverviewKpis(
@@ -187,7 +189,7 @@ export class AdminService {
     opts: { period?: PeriodKey; from?: string; to?: string },
   ) {
     this.assertRole(current, [AdminRole.OWNER, AdminRole.MANAGER, AdminRole.SUPERVISOR]);
-    return this.reportingService.getPlatformOverview(opts);
+    return this.analytics.getPlatformOverview(opts);
   }
 
   // ========= Top Gyms =========
@@ -218,7 +220,7 @@ export class AdminService {
       pageSize: query.pageSize ?? 10,
     };
 
-    return this.reportingService.getTopGyms(dto);
+    return this.analytics.getTopGyms(dto);
   }
 
   // ========= Gym Dues (مستحقات الأندية) =========

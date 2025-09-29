@@ -12,15 +12,16 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor() {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
-      secretOrKey: process.env.JWT_SECRET, // من .env
+      secretOrKey: process.env.JWT_SECRET,
     });
   }
 
   async validate(payload: any) {
-    // هذه القيم ستصبح في request.user
+    // توحيد اسم المعرّف بغض النظر عن شكل الـpayload
+    const userId = Number(payload.userId ?? payload.sub ?? payload.id);
     return {
-      userId: payload.sub,
-      type: payload.type,
+      userId,
+      type: payload.type ?? null,
       role: payload.role ?? null,
       gymId: payload.gymId ?? null,
     };
