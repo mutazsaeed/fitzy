@@ -2,6 +2,7 @@
 // cspell:disable
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { InMemoryCacheService } from '../../common/cache/cache.service';
 
 import {
   ReconciliationQueryDto,
@@ -10,19 +11,25 @@ import {
 } from '../dto/reconciliation.query.dto';
 import { ReconciliationResponseDto } from '../dto/reconciliation.response.dto';
 
+const TTL_FAST = 30_000;     // 30s
+const TTL_DEFAULT = 120_000; // 2m
+
 @Injectable()
 export class ReconciliationService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cache: InMemoryCacheService,
+  ) {}
 
-  // -------------------------------------------------
-  // Local helpers (ستُنقل لاحقاً إلى DateRangeUtil)
-  // -------------------------------------------------
+  // ---------------------------
+  // Local helpers
+  // ---------------------------
   private parseYmdToLocalStart(ymd: string): Date {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
     if (!m) throw new BadRequestException('Invalid date format, expected YYYY-MM-DD');
     const [, y, mo, d] = m;
     const dt = new Date(Number(y), Number(mo) - 1, Number(d), 0, 0, 0, 0);
-    if (isNaN(dt.getTime())) throw new BadRequestException('Invalid date value');
+    if (Number.isNaN(dt.getTime())) throw new BadRequestException('Invalid date value');
     return dt;
   }
 
@@ -34,11 +41,7 @@ export class ReconciliationService {
   }
 
   /** resolve YYYY-MM month or explicit from/to for reconciliation */
-  private resolveRecoRange(q: {
-    month?: string;
-    from?: string;
-    to?: string;
-  }): {
+  private resolveRecoRange(q: { month?: string; from?: string; to?: string }): {
     fromStart: Date;
     toStart: Date;
     toExclusive: Date;
@@ -55,7 +58,6 @@ export class ReconciliationService {
       const [, y, mo] = m;
       fromStart = new Date(Number(y), Number(mo) - 1, 1, 0, 0, 0, 0);
       toStart = new Date(fromStart);
-      // last day of month
       toStart.setMonth(toStart.getMonth() + 1);
       toStart.setDate(toStart.getDate() - 1);
     } else if (q.from && q.to) {
@@ -63,7 +65,6 @@ export class ReconciliationService {
       toStart = this.parseYmdToLocalStart(q.to);
       if (fromStart > toStart) throw new BadRequestException('from must be <= to');
     } else {
-      // default to current month
       const now = new Date();
       fromStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
       toStart = new Date(fromStart);
@@ -74,7 +75,7 @@ export class ReconciliationService {
     const toExclusive = new Date(toStart);
     toExclusive.setDate(toExclusive.getDate() + 1);
 
-    const tag = `${toStart.getFullYear()}${`${toStart.getMonth() + 1}`.padStart(2, '0')}`; // yyyymm
+    const tag = `${toStart.getFullYear()}${`${toStart.getMonth() + 1}`.padStart(2, '0')}`;
 
     return {
       fromStart,
@@ -86,9 +87,9 @@ export class ReconciliationService {
     };
   }
 
-  // -------------------------------------------------
+  // ---------------------------
   // Monthly Reconciliation (All Clubs)
-  // -------------------------------------------------
+  // ---------------------------
   async getMonthlyReconciliation(query: ReconciliationQueryDto): Promise<ReconciliationResponseDto> {
     const { fromStart, toExclusive, fromStr, toStr, invoiceMonthTag } =
       this.resolveRecoRange({ month: query.month, from: query.from, to: query.to });
@@ -98,6 +99,23 @@ export class ReconciliationService {
     const page = Math.max(1, Number(query.page ?? 1));
     const pageSize = Math.max(1, Math.min(100, Number(query.pageSize ?? 20)));
 
+    // --- CACHE (response) ---
+    const cacheKey = InMemoryCacheService.key('reco:list', {
+      from: fromStr,
+      to: toStr,
+      sortBy,
+      order,
+      page,
+      pageSize,
+    });
+    const cached = this.cache.get<ReconciliationResponseDto>(cacheKey);
+    if (cached) {
+      // لوج سريع للتأكيد
+      // eslint-disable-next-line no-console
+      console.debug('[CACHE HIT] reconciliation.getMonthlyReconciliation', cacheKey);
+      return cached;
+    }
+
     // 1) group visits by gymId in range
     const grouped = await this.prisma.visit.groupBy({
       by: ['gymId'],
@@ -106,16 +124,18 @@ export class ReconciliationService {
     });
 
     if (grouped.length === 0) {
-      return {
+      const empty: ReconciliationResponseDto = {
         range: { from: fromStr, to: toStr, timezone: 'Asia/Riyadh' },
         pagination: { page, pageSize, total: 0, totalPages: 0 },
         sort: { by: sortBy, order },
         items: [],
         totals: { totalVisits: 0, totalDues: 0 },
       };
+      this.cache.set(cacheKey, empty, TTL_FAST);
+      return empty;
     }
 
-    // 2) fetch gyms info (name, visitPrice)
+    // 2) gyms
     const gymIds = grouped.map((g) => g.gymId);
     const gyms = await this.prisma.gym.findMany({
       where: { id: { in: gymIds } },
@@ -123,13 +143,15 @@ export class ReconciliationService {
     });
     const mapGym = new Map(gyms.map((g) => [g.id, g]));
 
-    // 3) build items with dues + invoice number
+    // 3) items
     const itemsAll = grouped.map((g) => {
       const visits = g._count.gymId ?? 0;
       const gym = mapGym.get(g.gymId);
       const gymName = gym?.name ?? `Gym#${g.gymId}`;
       const visitPrice = gym?.visitPrice ?? null;
-      const dues = visitPrice ? Number((visits * Number(visitPrice)).toFixed(2)) : 0;
+      const dues = visitPrice
+        ? Number((visits * Number(visitPrice)).toFixed(2))
+        : 0;
       const invoiceNumber = `INV-${invoiceMonthTag}-${g.gymId}`;
       return {
         gymId: g.gymId,
@@ -169,22 +191,31 @@ export class ReconciliationService {
     const start = (page - 1) * pageSize;
     const items = start < total ? itemsAll.slice(start, start + pageSize) : [];
 
-    // 7) response
-    return {
+    const result: ReconciliationResponseDto = {
       range: { from: fromStr, to: toStr, timezone: 'Asia/Riyadh' },
       pagination: { page, pageSize, total, totalPages },
       sort: { by: sortBy, order },
       items,
       totals: { totalVisits, totalDues },
     };
+
+    this.cache.set(cacheKey, result, TTL_DEFAULT);
+    return result;
   }
 
-  // -------------------------------------------------
-  // Internal dataset builder for exports (CSV/PDF)
-  // -------------------------------------------------
+  // ---------------------------
+  // Dataset for exports (CSV/PDF)
+  // ---------------------------
   async buildRecoExport(query: ReconciliationQueryDto): Promise<{
     range: { from: string; to: string; timezone: string };
-    items: { gymId: number; gymName: string; visitPrice: number | null; visits: number; dues: number; invoiceNumber: string }[];
+    items: {
+      gymId: number;
+      gymName: string;
+      visitPrice: number | null;
+      visits: number;
+      dues: number;
+      invoiceNumber: string;
+    }[];
     totals: { totalVisits: number; totalDues: number };
     invoiceMonthTag: string;
   }> {
@@ -193,6 +224,33 @@ export class ReconciliationService {
 
     const sortBy = query.sortBy ?? RecoSortBy.DUES;
     const order = query.order ?? RecoOrder.DESC;
+
+    // --- CACHE (export dataset) ---
+    const cacheKey = InMemoryCacheService.key('reco:export', {
+      from: fromStr,
+      to: toStr,
+      sortBy,
+      order,
+      tag: invoiceMonthTag,
+    });
+    const cached = this.cache.get<{
+      range: { from: string; to: string; timezone: string };
+      items: {
+        gymId: number;
+        gymName: string;
+        visitPrice: number | null;
+        visits: number;
+        dues: number;
+        invoiceNumber: string;
+      }[];
+      totals: { totalVisits: number; totalDues: number };
+      invoiceMonthTag: string;
+    }>(cacheKey);
+    if (cached) {
+      // eslint-disable-next-line no-console
+      console.debug('[CACHE HIT] reconciliation.buildRecoExport', cacheKey);
+      return cached;
+    }
 
     const grouped = await this.prisma.visit.groupBy({
       by: ['gymId'],
@@ -214,7 +272,9 @@ export class ReconciliationService {
       const gym = mapGym.get(g.gymId);
       const gymName = gym?.name ?? `Gym#${g.gymId}`;
       const visitPrice = gym?.visitPrice ?? null;
-      const dues = visitPrice ? Number((visits * Number(visitPrice)).toFixed(2)) : 0;
+      const dues = visitPrice
+        ? Number((visits * Number(visitPrice)).toFixed(2))
+        : 0;
       const invoiceNumber = `INV-${invoiceMonthTag}-${g.gymId}`;
       return {
         gymId: g.gymId,
@@ -226,6 +286,7 @@ export class ReconciliationService {
       };
     });
 
+    // sort
     itemsAll.sort((a, b) => {
       let cmp: number;
       switch (sortBy) {
@@ -246,11 +307,14 @@ export class ReconciliationService {
     const totalVisits = itemsAll.reduce((s, x) => s + x.visits, 0);
     const totalDues = Number(itemsAll.reduce((s, x) => s + x.dues, 0).toFixed(2));
 
-    return {
+    const result = {
       range: { from: fromStr, to: toStr, timezone: 'Asia/Riyadh' },
       items: itemsAll,
       totals: { totalVisits, totalDues },
       invoiceMonthTag,
     };
+
+    this.cache.set(cacheKey, result, TTL_DEFAULT);
+    return result;
   }
 }

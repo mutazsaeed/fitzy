@@ -1,17 +1,20 @@
 /* eslint-disable prettier/prettier */
 // cspell:disable
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { UserVisitsQueryDto } from '../dto/user-visits.query.dto';
 import { UserVisitsResponseDto } from '../dto/user-visits.response.dto';
+import { UserSubscriptionRemainingQueryDto } from '../dto/user-subscription-remaining.query.dto';
+import { UserSubscriptionRemainingResponseDto } from '../dto/user-subscription-remaining.response.dto';
+
+type Plan = 'BASIC' | 'STANDARD' | 'PREMIUM';
 
 @Injectable()
 export class UserReportsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  // ---------------------------
-  // Local helpers (سيُنقل لاحقاً إلى DateRangeUtil)
-  // ---------------------------
+  private readonly TZ = 'Asia/Riyadh' as const;
+
   private parseYmdToLocalStart(ymd: string): Date {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
     if (!m) throw new BadRequestException('Invalid date format, expected YYYY-MM-DD');
@@ -28,16 +31,22 @@ export class UserReportsService {
     return `${y}-${m}-${day}`;
   }
 
-  // ---------------------------
-  // Public API
-  // ---------------------------
-  /**
-   * تقارير زيارات المستخدم (My Visits)
-   * نفس منطق ReportingService.getMyVisits لكن معزول هنا
-   * دون أي تأثير على الخدمات/الكونترولرز الحالية.
-   */
+  private addDays(d: Date, days: number): Date {
+    const x = new Date(d);
+    x.setDate(x.getDate() + days);
+    return x;
+  }
+
+  private clamp(n: number, min: number, max: number): number {
+    return Math.max(min, Math.min(max, n));
+  }
+
+  private diffDaysUTC(a: Date, b: Date): number {
+    const MS = 24 * 60 * 60 * 1000;
+    return Math.floor((b.getTime() - a.getTime()) / MS);
+  }
+
   async getMyVisits(userId: number, q: UserVisitsQueryDto): Promise<UserVisitsResponseDto> {
-    // resolve range (افتراضي 30 يوم)
     const fromStart = q.from
       ? this.parseYmdToLocalStart(q.from)
       : (() => {
@@ -57,18 +66,15 @@ export class UserReportsService {
 
     if (fromStart > toStart) throw new BadRequestException('from must be <= to');
 
-    const toExclusive = new Date(toStart);
-    toExclusive.setDate(toExclusive.getDate() + 1);
+    const toExclusive = this.addDays(toStart, 1);
 
     const page = Math.max(1, Number(q.page ?? 1));
     const pageSize = Math.max(1, Math.min(100, Number(q.pageSize ?? 20)));
 
-    // إجمالي
     const total = await this.prisma.visit.count({
       where: { userId, visitDate: { gte: fromStart, lt: toExclusive } },
     });
 
-    // عناصر الصفحة (أحدث أولاً)
     const rows = await this.prisma.visit.findMany({
       where: { userId, visitDate: { gte: fromStart, lt: toExclusive } },
       orderBy: [{ visitDate: 'desc' }, { id: 'desc' }],
@@ -98,9 +104,98 @@ export class UserReportsService {
     const totalPages = Math.ceil(total / pageSize);
 
     return {
-      range: { from: this.toYmd(fromStart), to: this.toYmd(toStart), timezone: 'Asia/Riyadh' },
+      range: { from: this.toYmd(fromStart), to: this.toYmd(toStart), timezone: this.TZ },
       pagination: { page, pageSize, total, totalPages },
       items,
+    };
+  }
+
+  async getMySubscriptionRemaining(
+    userId: number,
+    q: UserSubscriptionRemainingQueryDto,
+  ): Promise<UserSubscriptionRemainingResponseDto> {
+    const asOfStart = q.asOf
+      ? this.parseYmdToLocalStart(q.asOf)
+      : (() => {
+          const d = new Date();
+          d.setHours(0, 0, 0, 0);
+          return d;
+        })();
+
+    const sub = await this.prisma.userSubscription.findFirst({
+      where: {
+        userId,
+        startDate: { lte: asOfStart },
+        endDate: { gt: asOfStart },
+        status: 'ACTIVE',
+      },
+      select: {
+        id: true,
+        startDate: true,
+        endDate: true,
+        visitLimit: true,
+        subscription: { select: { level: true } },
+      },
+    });
+
+    if (!sub) {
+      throw new NotFoundException('No active subscription found for the selected date');
+    }
+
+    const periodFrom = new Date(sub.startDate);
+    periodFrom.setHours(0, 0, 0, 0);
+
+    const periodToExclusive = new Date(sub.endDate);
+
+    const asOfEndExclusive = this.addDays(asOfStart, 1);
+    const visitsUpperBound =
+      asOfEndExclusive < periodToExclusive ? asOfEndExclusive : periodToExclusive;
+
+    const usedVisits = await this.prisma.visit.count({
+      where: {
+        userId,
+        visitDate: { gte: periodFrom, lt: visitsUpperBound },
+      },
+    });
+
+    const totalVisits = Number(sub.visitLimit ?? 0);
+    const remainingVisits = Math.max(0, totalVisits - usedVisits);
+
+    const totalDays = this.diffDaysUTC(periodFrom, periodToExclusive);
+    const passedDaysRaw = this.diffDaysUTC(periodFrom, asOfEndExclusive);
+    const passedDays = this.clamp(passedDaysRaw, 0, Math.max(0, totalDays));
+    const remainingDays = Math.max(0, totalDays - passedDays);
+
+    const visitThreshold = Number.isInteger(q.visitThreshold) ? Number(q.visitThreshold) : 3;
+    const daysThreshold = Number.isInteger(q.daysThreshold) ? Number(q.daysThreshold) : 5;
+
+    const nearExpiry =
+      (totalVisits > 0 && remainingVisits <= visitThreshold) || remainingDays <= daysThreshold;
+
+    const planRaw = (sub.subscription?.level ?? 'BASIC').toString().toUpperCase();
+    const plan: Plan = (['BASIC', 'STANDARD', 'PREMIUM'].includes(planRaw)
+      ? planRaw
+      : 'BASIC') as Plan;
+
+    return {
+      subscriptionId: sub.id,
+      plan,
+      period: {
+        from: this.toYmd(periodFrom),
+        toExclusive: this.toYmd(periodToExclusive),
+        timezone: this.TZ,
+      },
+      usage: {
+        totalVisits,
+        usedVisits,
+        remainingVisits,
+      },
+      days: {
+        total: totalDays,
+        passed: passedDays,
+        remaining: remainingDays,
+      },
+      nearExpiry,
     };
   }
 }

@@ -20,8 +20,9 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  subscriptions Subscription[]
-  visits        Visit[]
+  subscriptions      Subscription[]
+  userSubscriptions  UserSubscription[]
+  visits             Visit[]
 }
 
 model Admin {
@@ -50,7 +51,6 @@ model GymAdmin {
   gym      Gym          @relation(fields: [gymId], references: [id], onDelete: Cascade)
   role     GymAdminRole @default(RECEPTIONIST)
 
-  // علاقات إلى الفروع عبر جدول الربط
   branches GymAdminBranch[]
 
   createdAt DateTime @default(now())
@@ -73,9 +73,10 @@ model Subscription {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  users  User[]
-  gyms   Gym[]
-  visits Visit[]
+  users             User[]
+  userSubscriptions UserSubscription[]
+  gyms              Gym[]
+  visits            Visit[]
 }
 
 model Gym {
@@ -97,8 +98,6 @@ model Gym {
   subscriptions Subscription[]
   visits        Visit[]
   gymAdmins     GymAdmin[]
-
-  // NEW: فروع النادي
   branches      Branch[]
 }
 
@@ -112,10 +111,6 @@ enum VisitMethod {
   MANUAL
 }
 
-/**
- * NEW: فرع يتبع نادي
- * Gym (1) -- (N) Branch -- (N) Visit
- */
 model Branch {
   id           Int      @id @default(autoincrement())
   gymId        Int
@@ -128,7 +123,6 @@ model Branch {
   workingHours Json?
   isActive     Boolean  @default(true)
 
-  // علاقات
   visits       Visit[]
   gymAdmins    GymAdminBranch[]
 
@@ -139,9 +133,6 @@ model Branch {
   @@index([gymId, isActive])
 }
 
-/**
- * NEW: ربط صلاحيات المشرفين على فروع محددة
- */
 model GymAdminBranch {
   gymAdminId Int
   branchId   Int
@@ -158,11 +149,8 @@ model Visit {
   id             Int  @id @default(autoincrement())
   userId         Int
   gymId          Int
-
-  // NEW: ربط الزيارة بفرع (اختياري الآن — سنجعله Required لاحقاً بعد تفعيل كامل المنظومة)
   branchId       Int?
   branch         Branch?       @relation(fields: [branchId], references: [id])
-
   subscriptionId Int?
 
   visitDate    DateTime    @db.Date
@@ -179,11 +167,35 @@ model Visit {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // مبدئياً نُبقي القيد الحالي كما هو (بدون branchId) لتفادي تعارض البيانات القديمة
   @@unique([userId, gymId, visitDate], map: "uniq_user_gym_per_day")
-
-  // فهارس
   @@index([userId, visitDate])
   @@index([gymId, visitDate])
   @@index([branchId, visitDate])
+}
+
+enum UserSubscriptionStatus {
+  ACTIVE
+  PAUSED
+  CANCELED
+  EXPIRED
+}
+
+model UserSubscription {
+  id              Int                   @id @default(autoincrement())
+  userId          Int
+  subscriptionId  Int
+  startDate       DateTime              @db.Date
+  endDate         DateTime              @db.Date
+  visitLimit      Int
+  status          UserSubscriptionStatus @default(ACTIVE)
+
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subscription    Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([userId, startDate, endDate])
+  @@index([subscriptionId])
+  @@unique([userId, startDate, endDate], map: "uniq_user_subscription_period")
 }

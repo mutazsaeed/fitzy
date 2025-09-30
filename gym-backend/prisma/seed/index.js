@@ -5,6 +5,7 @@ const { seedGyms } = require('./gyms');
 const { seedSubscriptions } = require('./subscriptions');
 const { seedVisits } = require('./visits');
 const { seedAdmins } = require('./admins');
+const { seedUserSubscriptions } = require('./user-subscriptions');
 
 const prisma = new PrismaClient();
 
@@ -20,6 +21,9 @@ async function main(target = 'all') {
   }
   if (target === 'all' || target === 'subs' || target === 'subscriptions') {
     await seedSubscriptions(prisma);
+  }
+  if (target === 'all' || target === 'user-subs' || target === 'userSubscriptions') {
+    await seedUserSubscriptions();
   }
   if (target === 'all' || target === 'visits') {
     await seedVisits(prisma);

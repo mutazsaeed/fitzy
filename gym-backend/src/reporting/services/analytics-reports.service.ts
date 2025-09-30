@@ -1,9 +1,9 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 /* eslint-disable prettier/prettier */
-// cspell:disable
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { InMemoryCacheService } from '../../common/cache/cache.service';
 
 import { AdminOverviewKpiDto } from '../dto/admin-overview-kpi.dto';
 
@@ -31,19 +31,25 @@ import {
   BranchDailySeries,
 } from '../dto/gym-branch-daily.dto';
 
+const TTL_FAST = 30_000; // 30s for small/quick reports
+const TTL_DEFAULT = 120_000; // 2m for heavier reports
+
 @Injectable()
 export class AnalyticsReportsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cache: InMemoryCacheService,
+  ) {}
 
-  // -------------------------------------------------
-  // Local helpers (ستُنقل لاحقاً إلى DateRangeUtil)
-  // -------------------------------------------------
+  // -----------------------
+  // Local date helpers
+  // -----------------------
   private parseYmdToLocalStart(ymd: string): Date {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
     if (!m) throw new BadRequestException('Invalid date format, expected YYYY-MM-DD');
     const [, y, mo, d] = m;
     const dt = new Date(Number(y), Number(mo) - 1, Number(d), 0, 0, 0, 0);
-    if (isNaN(dt.getTime())) throw new BadRequestException('Invalid date value');
+    if (Number.isNaN(dt.getTime())) throw new BadRequestException('Invalid date value');
     return dt;
   }
 
@@ -107,21 +113,28 @@ export class AnalyticsReportsService {
     };
   }
 
-  // -------------------------------------------------
+  // -----------------------
   // Admin/Owner Overview KPI
-  // -------------------------------------------------
+  // -----------------------
   async getPlatformOverview(params: {
     period?: 'today' | '7d' | '30d';
     from?: string;
     to?: string;
   }): Promise<AdminOverviewKpiDto> {
-    // إزالة toStart لأنه غير مستخدم لتفادي تحذير eslint
     const { fromStart, toExclusive, fromStr, toStr } = this.resolvePeriod(params);
+
+    const cacheKey = InMemoryCacheService.key('analytics:overview', {
+      from: fromStr,
+      to: toStr,
+    });
+    const cached = this.cache.get<AdminOverviewKpiDto>(cacheKey);
+    if (cached) return cached;
 
     const totalVisits = await this.prisma.visit.count({
       where: { visitDate: { gte: fromStart, lt: toExclusive } },
     });
 
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const rows = await this.prisma.$queryRaw<{ date: string; visits: number }[]>`
       SELECT to_char(date_trunc('day', "visitDate"), 'YYYY-MM-DD') AS date,
              COUNT(*)::int AS visits
@@ -132,7 +145,10 @@ export class AnalyticsReportsService {
       ORDER BY 1
     `;
 
-    const ts: { date: string; visits: number }[] = [];
+    const ts: {
+      date: string;
+      visits: number;
+    }[] = [];
     const map = new Map<string, number>(rows.map((r) => [r.date, r.visits]));
     const cur = new Date(fromStart);
     while (cur < toExclusive) {
@@ -141,22 +157,25 @@ export class AnalyticsReportsService {
       cur.setDate(cur.getDate() + 1);
     }
 
-    // TODO: لاحقاً نربطها بمصدر الإيرادات والاشتراكات
+    // Placeholder (to be wired when revenue/subscriptions are implemented)
     const activeSubscriptions = 0;
     const totalRevenue = 0;
 
-    return {
+    const result: AdminOverviewKpiDto = {
       period: { from: fromStr, to: toStr },
       totalVisits,
       activeSubscriptions,
       totalRevenue,
       timeseries: ts,
     };
+
+    this.cache.set(cacheKey, result, TTL_DEFAULT);
+    return result;
   }
 
-  // -------------------------------------------------
+  // -----------------------
   // Admin/Owner - Top Gyms
-  // -------------------------------------------------
+  // -----------------------
   async getTopGyms(query: TopGymsQueryDto): Promise<TopGymsResponse> {
     let fromStart: Date;
     let toStart: Date;
@@ -181,6 +200,17 @@ export class AnalyticsReportsService {
     const page = Math.max(1, Number(query.page ?? 1));
     const pageSize = Math.max(1, Math.min(100, Number(query.pageSize ?? 10)));
 
+    const cacheKey = InMemoryCacheService.key('analytics:top-gyms', {
+      from: this.toYmd(fromStart),
+      to: this.toYmd(toStart),
+      sortBy,
+      order,
+      page,
+      pageSize,
+    });
+    const cached = this.cache.get<TopGymsResponse>(cacheKey);
+    if (cached) return cached;
+
     const grouped = await this.prisma.visit.groupBy({
       by: ['gymId'],
       where: { visitDate: { gte: fromStart, lt: toExclusive } },
@@ -189,12 +219,18 @@ export class AnalyticsReportsService {
 
     const gymIds = grouped.map((g) => g.gymId);
     if (gymIds.length === 0) {
-      return {
-        range: { from: this.toYmd(fromStart), to: this.toYmd(toStart), timezone: 'Asia/Riyadh' },
+      const empty: TopGymsResponse = {
+        range: {
+          from: this.toYmd(fromStart),
+          to: this.toYmd(toStart),
+          timezone: 'Asia/Riyadh',
+        },
         pagination: { page, pageSize, total: 0, totalPages: 0 },
         sort: { by: sortBy, order },
         items: [],
       };
+      this.cache.set(cacheKey, empty, TTL_FAST);
+      return empty;
     }
 
     const gyms = await this.prisma.gym.findMany({
@@ -228,23 +264,34 @@ export class AnalyticsReportsService {
     const start = (page - 1) * pageSize;
     const paged = start < total ? itemsAll.slice(start, start + pageSize) : [];
 
-    return {
-      range: { from: this.toYmd(fromStart), to: this.toYmd(toStart), timezone: 'Asia/Riyadh' },
+    const result: TopGymsResponse = {
+      range: {
+        from: this.toYmd(fromStart),
+        to: this.toYmd(toStart),
+        timezone: 'Asia/Riyadh',
+      },
       pagination: { page, pageSize, total, totalPages },
       sort: { by: sortBy, order },
       items: paged,
     };
+
+    this.cache.set(cacheKey, result, TTL_DEFAULT);
+    return result;
   }
 
-  // -------------------------------------------------
+  // -----------------------
   // Admin/Owner — Plan Usage
-  // -------------------------------------------------
+  // -----------------------
   private planLimitFallback(plan: PlanKey): number {
     switch (plan) {
-      case 'BASIC': return 8;
-      case 'STANDARD': return 12;
-      case 'PREMIUM': return 20;
-      default: return 10;
+      case 'BASIC':
+        return 8;
+      case 'STANDARD':
+        return 12;
+      case 'PREMIUM':
+        return 20;
+      default:
+        return 10;
     }
   }
 
@@ -266,10 +313,23 @@ export class AnalyticsReportsService {
 
     const low = typeof query.lowThreshold === 'number' ? query.lowThreshold : 0.3;
     const high = typeof query.highThreshold === 'number' ? query.highThreshold : 0.8;
-    if (low < 0 || high > 1 || low >= high) throw new BadRequestException('invalid thresholds');
+    if (low < 0 || high > 1 || low >= high) {
+      throw new BadRequestException('invalid thresholds');
+    }
 
     const page = Math.max(1, Number(query.page ?? 1));
     const pageSize = Math.max(1, Math.min(100, Number(query.pageSize ?? 20)));
+
+    const cacheKey = InMemoryCacheService.key('analytics:plan-usage', {
+      from: this.toYmd(fromStart),
+      to: this.toYmd(toStart),
+      low,
+      high,
+      page,
+      pageSize,
+    });
+    const cached = this.cache.get<PlanUsageResponseDto>(cacheKey);
+    if (cached) return cached;
 
     // 1) visits grouped by user + subscriptionId within range
     const grouped = await this.prisma.visit.groupBy({
@@ -279,18 +339,26 @@ export class AnalyticsReportsService {
     });
 
     if (grouped.length === 0) {
-      return {
-        range: { from: this.toYmd(fromStart), to: this.toYmd(toStart), timezone: 'Asia/Riyadh' },
+      const empty: PlanUsageResponseDto = {
+        range: {
+          from: this.toYmd(fromStart),
+          to: this.toYmd(toStart),
+          timezone: 'Asia/Riyadh',
+        },
         thresholds: { low, high },
         pagination: { page, pageSize, total: 0, totalPages: 0 },
         perPlan: [],
         items: [],
       };
+      this.cache.set(cacheKey, empty, TTL_FAST);
+      return empty;
     }
 
     const userIds = Array.from(new Set(grouped.map((g) => g.userId)));
     const subIds = Array.from(
-      new Set(grouped.map((g) => g.subscriptionId).filter((x): x is number => x !== null)),
+      grouped
+        .map((g) => g.subscriptionId)
+        .filter((x): x is number => x !== null),
     );
 
     // 2) fetch subscriptions used (id + name)
@@ -303,11 +371,19 @@ export class AnalyticsReportsService {
     const subMap = new Map(subs.map((s) => [s.id, s.name]));
 
     // 3) pick primary plan per user (subscriptionId with max visits)
-    const bestByUser = new Map<number, { subscriptionId: number | null; count: number }>();
+    const bestByUser = new Map<
+      number,
+      { subscriptionId: number | null; count: number }
+    >();
     for (const row of grouped) {
       const prev = bestByUser.get(row.userId);
       const cnt = row._count._all ?? 0;
-      if (!prev || cnt > prev.count) bestByUser.set(row.userId, { subscriptionId: row.subscriptionId, count: cnt });
+      if (!prev || cnt > prev.count) {
+        bestByUser.set(row.userId, {
+          subscriptionId: row.subscriptionId,
+          count: cnt,
+        });
+      }
     }
 
     // 4) fetch users
@@ -319,12 +395,15 @@ export class AnalyticsReportsService {
 
     // 5) build items
     const itemsAll = Array.from(bestByUser.entries()).map(([userId, best]) => {
-      const subName = best.subscriptionId ? subMap.get(best.subscriptionId) ?? null : null;
+      const subName = best.subscriptionId
+        ? (subMap.get(best.subscriptionId) ?? null)
+        : null;
       const plan: PlanKey = this.getPlanKeyFromName(subName);
       const visitLimit = this.planLimitFallback(plan);
       const used = best.count;
       const ratio = visitLimit > 0 ? Math.max(0, Math.min(1, used / visitLimit)) : 0;
-      const bucket: 'low' | 'normal' | 'high' = ratio < low ? 'low' : ratio > high ? 'high' : 'normal';
+      const bucket: 'low' | 'normal' | 'high' =
+        ratio < low ? 'low' : ratio > high ? 'high' : 'normal';
       const u = userMap.get(userId);
       return {
         userId,
@@ -341,10 +420,24 @@ export class AnalyticsReportsService {
     // 6) aggregates per plan
     const perPlanMap = new Map<
       PlanKey,
-      { plan: PlanKey; subscribers: number; avgUsage: number; medianUsage: number; lowCount: number; highCount: number }
+      {
+        plan: PlanKey;
+        subscribers: number;
+        avgUsage: number;
+        medianUsage: number;
+        lowCount: number;
+        highCount: number;
+      }
     >();
     (['BASIC', 'STANDARD', 'PREMIUM', 'UNKNOWN'] as PlanKey[]).forEach((p) =>
-      perPlanMap.set(p, { plan: p, subscribers: 0, avgUsage: 0, medianUsage: 0, lowCount: 0, highCount: 0 }),
+      perPlanMap.set(p, {
+        plan: p,
+        subscribers: 0,
+        avgUsage: 0,
+        medianUsage: 0,
+        lowCount: 0,
+        highCount: 0,
+      }),
     );
 
     for (const it of itemsAll) {
@@ -363,7 +456,10 @@ export class AnalyticsReportsService {
           .map((x) => x.usageRatio)
           .sort((a, b) => a - b);
         const mid = Math.floor(ratios.length / 2);
-        agg.medianUsage = ratios.length % 2 ? ratios[mid] : Number(((ratios[mid - 1] + ratios[mid]) / 2).toFixed(4));
+        agg.medianUsage =
+          ratios.length % 2
+            ? ratios[mid]
+            : Number(((ratios[mid - 1] + ratios[mid]) / 2).toFixed(4));
       }
     }
 
@@ -373,28 +469,46 @@ export class AnalyticsReportsService {
     const start = (page - 1) * pageSize;
     const items = start < total ? itemsAll.slice(start, start + pageSize) : [];
 
-    return {
-      range: { from: this.toYmd(fromStart), to: this.toYmd(toStart), timezone: 'Asia/Riyadh' },
+    const result: PlanUsageResponseDto = {
+      range: {
+        from: this.toYmd(fromStart),
+        to: this.toYmd(toStart),
+        timezone: 'Asia/Riyadh',
+      },
       thresholds: { low, high },
       pagination: { page, pageSize, total, totalPages },
       perPlan: Array.from(perPlanMap.values()).filter((p) => p.subscribers > 0),
       items,
     };
+
+    this.cache.set(cacheKey, result, TTL_DEFAULT);
+    return result;
   }
 
-  // -------------------------------------------------
+  // -----------------------
   // Gym-level analytics
-  // -------------------------------------------------
+  // -----------------------
 
-  /** خريطة الزيارات بالساعات (حسب checkedInAt مع مراعاة Asia/Riyadh) */
-  async getGymHourlyHeatmap(q: GymHourlyHeatmapQueryDto): Promise<GymHourlyHeatmapResponseDto> {
+  /** Hourly visits heatmap for a gym (optionally by branch). */
+  async getGymHourlyHeatmap(
+    q: GymHourlyHeatmapQueryDto,
+  ): Promise<GymHourlyHeatmapResponseDto> {
     const { fromStart, toStart, toExclusive } = this.resolvePeriod({
       period: (q.period as any) ?? '7d',
       from: q.from,
       to: q.to,
     });
 
-    // SQL: استخراج يوم الأسبوع والساعة بعد تحويل المنطقة الزمنية
+    const cacheKey = InMemoryCacheService.key('analytics:gym-hourly-heatmap', {
+      gymId: q.gymId,
+      branchId: q.branchId ?? null,
+      from: this.toYmd(fromStart),
+      to: this.toYmd(toStart),
+    });
+    const cached = this.cache.get<GymHourlyHeatmapResponseDto>(cacheKey);
+    if (cached) return cached;
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const rows: { dow: number; hour: number; visits: number }[] =
       q.branchId !== undefined
         ? await this.prisma.$queryRaw<{ dow: number; hour: number; visits: number }[]>`
@@ -423,7 +537,6 @@ export class AnalyticsReportsService {
           ORDER BY 1,2
         `;
 
-    // ملء المصفوفة 7x24 بالقيم (صفر للفراغات)
     const map = new Map<string, number>();
     for (const r of rows) map.set(`${r.dow}-${r.hour}`, r.visits);
 
@@ -435,7 +548,6 @@ export class AnalyticsReportsService {
       }
     }
 
-    // حساب ساعات وأيام الذروة
     const hourAgg = new Map<number, number>();
     const dowAgg = new Map<number, number>();
     for (const cell of heatmap) {
@@ -451,44 +563,64 @@ export class AnalyticsReportsService {
       .sort((a, b) => b.visits - a.visits)
       .slice(0, 3);
 
-    return {
-      range: { from: this.toYmd(fromStart), to: this.toYmd(toStart), timezone: 'Asia/Riyadh' },
+    const result: GymHourlyHeatmapResponseDto = {
+      range: {
+        from: this.toYmd(fromStart),
+        to: this.toYmd(toStart),
+        timezone: 'Asia/Riyadh',
+      },
       params: { gymId: q.gymId, branchId: q.branchId ?? null },
       heatmap,
       peak: { topHours, topDays },
     };
+
+    this.cache.set(cacheKey, result, TTL_FAST);
+    return result;
   }
 
-  /** زيارات يومية لكل فرع داخل المدى */
-  async getGymBranchDaily(q: GymBranchDailyQueryDto): Promise<GymBranchDailyResponseDto> {
+  /** Daily visits per branch within a range. */
+  async getGymBranchDaily(
+    q: GymBranchDailyQueryDto,
+  ): Promise<GymBranchDailyResponseDto> {
     const { fromStart, toStart, toExclusive } = this.resolvePeriod({
       period: (q.period as any) ?? '30d',
       from: q.from,
       to: q.to,
     });
 
-    // إجمالي الزيارات والمستخدمين المميزين
+    const cacheKey = InMemoryCacheService.key('analytics:gym-branch-daily', {
+      gymId: q.gymId,
+      branchId: q.branchId ?? null,
+      from: this.toYmd(fromStart),
+      to: this.toYmd(toStart),
+    });
+    const cached = this.cache.get<GymBranchDailyResponseDto>(cacheKey);
+    if (cached) return cached;
+
     const whereBase: Prisma.VisitWhereInput = {
       gymId: q.gymId,
       visitDate: { gte: fromStart, lt: toExclusive },
       ...(q.branchId !== undefined ? { branchId: q.branchId } : {}),
     };
     const totalVisits = await this.prisma.visit.count({ where: whereBase });
-    const uniqueUsers = (await this.prisma.visit.groupBy({ by: ['userId'], where: whereBase })).length;
+    const uniqueUsers = (
+      await this.prisma.visit.groupBy({ by: ['userId'], where: whereBase })
+    ).length;
 
-    // إحضار السلاسل اليومية للفروع
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const rows: {
       branchId: number | null;
       branchName: string | null;
       date: string;
       visits: number;
-    }[] = q.branchId !== undefined
-      ? await this.prisma.$queryRaw<{
-          branchId: number | null;
-          branchName: string | null;
-          date: string;
-          visits: number;
-        }[]>`
+    }[] =
+      q.branchId !== undefined
+        ? await this.prisma.$queryRaw<{
+            branchId: number | null;
+            branchName: string | null;
+            date: string;
+            visits: number;
+          }[]>`
         SELECT
           v."branchId" AS "branchId",
           b."name"     AS "branchName",
@@ -503,12 +635,12 @@ export class AnalyticsReportsService {
         GROUP BY v."branchId", b."name", "date"
         ORDER BY v."branchId", "date"
       `
-      : await this.prisma.$queryRaw<{
-          branchId: number | null;
-          branchName: string | null;
-          date: string;
-          visits: number;
-        }[]>`
+        : await this.prisma.$queryRaw<{
+            branchId: number | null;
+            branchName: string | null;
+            date: string;
+            visits: number;
+          }[]>`
         SELECT
           v."branchId" AS "branchId",
           b."name"     AS "branchName",
@@ -523,7 +655,6 @@ export class AnalyticsReportsService {
         ORDER BY v."branchId", "date"
       `;
 
-    // تجهيز قائمة التواريخ الكاملة للمدى
     const allDates: string[] = [];
     const cur = new Date(fromStart);
     while (cur < toExclusive) {
@@ -531,10 +662,9 @@ export class AnalyticsReportsService {
       cur.setDate(cur.getDate() + 1);
     }
 
-    // تجميع حسب الفرع
     const seriesMap = new Map<number, BranchDailySeries>();
     for (const r of rows) {
-      const id = r.branchId ?? 0; // 0 لزيارات بدون فرع محدد
+      const id = r.branchId ?? 0; // group visits with no branch under id=0
       if (!seriesMap.has(id)) {
         seriesMap.set(id, {
           branchId: id,
@@ -543,11 +673,11 @@ export class AnalyticsReportsService {
         });
       }
     }
-    // املأ كل الأيام بقيم صفرية
+
     for (const [, ser] of seriesMap) {
       ser.points = allDates.map((d) => ({ date: d, visits: 0 }));
     }
-    // عبّئ القيم الموجودة
+
     const indexByDate = new Map(allDates.map((d, i) => [d, i]));
     for (const r of rows) {
       const id = r.branchId ?? 0;
@@ -560,10 +690,17 @@ export class AnalyticsReportsService {
       a.branchId === b.branchId ? 0 : a.branchId < b.branchId ? -1 : 1,
     );
 
-    return {
-      range: { from: this.toYmd(fromStart), to: this.toYmd(toStart), timezone: 'Asia/Riyadh' },
+    const result: GymBranchDailyResponseDto = {
+      range: {
+        from: this.toYmd(fromStart),
+        to: this.toYmd(toStart),
+        timezone: 'Asia/Riyadh',
+      },
       series,
       totals: { visits: totalVisits, uniqueUsers },
     };
+
+    this.cache.set(cacheKey, result, TTL_DEFAULT);
+    return result;
   }
 }
